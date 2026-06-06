@@ -1,0 +1,39 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Merge upstream into main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "shengmingboai@gmail.com"
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/QuantumNous/new-api.git
+          git fetch upstream main
+
+      - name: Merge upstream
+        run: |
+          git merge --no-edit upstream/main
+
+      - name: Push changes
+        run: |
+          git push origin main
