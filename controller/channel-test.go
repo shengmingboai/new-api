@@ -74,8 +74,16 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	return rootUser.Id, nil
 }
 
-func testChannel(channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+func testChannel(channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) (result testResult) {
 	tik := time.Now()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	defer func() {
+		if result.localErr != nil || result.newAPIError != nil {
+			recordFailedChannelTestLog(c, channel, testUserID, testModel, endpointType, isStream, tik, result)
+		}
+	}()
+
 	var unsupportedTestChannelTypes = []int{
 		constant.ChannelTypeMidjourney,
 		constant.ChannelTypeMidjourneyPlus,
@@ -91,8 +99,6 @@ func testChannel(channel *model.Channel, testUserID int, testModel string, endpo
 			localErr: fmt.Errorf("%s channel test is not supported", channelTypeName),
 		}
 	}
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
 
 	testModel = strings.TrimSpace(testModel)
 	if testModel == "" {
@@ -478,8 +484,8 @@ func testChannel(channel *model.Channel, testUserID int, testModel string, endpo
 			newAPIError: types.NewOpenAIError(usageErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
 		}
 	}
-	result := w.Result()
-	respBody, err := readTestResponseBody(result.Body, isStream)
+	httpResult := w.Result()
+	respBody, err := readTestResponseBody(httpResult.Body, isStream)
 	if err != nil {
 		return testResult{
 			context:     c,
@@ -520,6 +526,68 @@ func testChannel(channel *model.Channel, testUserID int, testModel string, endpo
 		localErr:    nil,
 		newAPIError: nil,
 	}
+}
+
+func recordFailedChannelTestLog(c *gin.Context, channel *model.Channel, testUserID int, modelName string, endpointType string, isStream bool, startTime time.Time, result testResult) {
+	if c == nil || channel == nil {
+		return
+	}
+
+	err := result.localErr
+	if err == nil && result.newAPIError != nil {
+		err = result.newAPIError
+	}
+	if err == nil {
+		return
+	}
+	errMessage := err.Error()
+	if result.newAPIError != nil {
+		errMessage = result.newAPIError.MaskSensitiveErrorWithStatusCode()
+	}
+
+	if modelName == "" {
+		modelName = c.GetString("original_model")
+	}
+	if modelName == "" {
+		modelName = common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
+	}
+	if modelName == "" {
+		modelName = "unknown"
+	}
+
+	group := c.GetString("group")
+	if group == "" {
+		group = common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+	}
+
+	useTimeSeconds := int(time.Since(startTime).Seconds())
+	other := map[string]interface{}{
+		"test_success":  false,
+		"error_message": errMessage,
+		"channel_id":    channel.Id,
+		"channel_name":  channel.Name,
+		"channel_type":  channel.Type,
+	}
+	if endpointType != "" {
+		other["endpoint_type"] = endpointType
+	}
+	if result.newAPIError != nil {
+		other["error_type"] = result.newAPIError.GetErrorType()
+		other["error_code"] = result.newAPIError.GetErrorCode()
+		other["status_code"] = result.newAPIError.StatusCode
+	}
+
+	model.RecordConsumeLog(c, testUserID, model.RecordConsumeLogParams{
+		ChannelId:      channel.Id,
+		ModelName:      modelName,
+		TokenName:      "模型测试",
+		Quota:          0,
+		Content:        "模型测试失败：" + errMessage,
+		UseTimeSeconds: useTimeSeconds,
+		IsStream:       isStream,
+		Group:          group,
+		Other:          other,
+	})
 }
 
 func attachTestBillingRequestInput(info *relaycommon.RelayInfo, request dto.Request) error {
