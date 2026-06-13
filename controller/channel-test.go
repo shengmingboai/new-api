@@ -893,7 +893,47 @@ func TestChannel(c *gin.Context) {
 var testAllChannelsLock sync.Mutex
 var testAllChannelsRunning bool = false
 
-func testAllChannels(notify bool) error {
+func shouldTestChannelForManualTest(channel *model.Channel) bool {
+	return channel.Status != common.ChannelStatusManuallyDisabled
+}
+
+func shouldTestChannelForScheduledTest(channel *model.Channel) bool {
+	monitorSetting := operation_setting.GetMonitorSetting()
+	switch channel.Status {
+	case common.ChannelStatusEnabled:
+		return common.AutomaticDisableChannelEnabled && monitorSetting.AutoTestChannelDisableOnFailure
+	case common.ChannelStatusAutoDisabled:
+		return common.AutomaticEnableChannelEnabled
+	default:
+		return false
+	}
+}
+
+func shouldDisableChannelForManualTest(err *types.NewAPIError) bool {
+	return service.ShouldDisableChannel(err)
+}
+
+func shouldDisableChannelForScheduledTest(err *types.NewAPIError) bool {
+	if !operation_setting.GetMonitorSetting().AutoTestChannelDisableOnFailure {
+		return false
+	}
+	return service.ShouldDisableChannel(err)
+}
+
+func shouldApplyDisableThresholdForManualTest() bool {
+	return common.AutomaticDisableChannelEnabled
+}
+
+func shouldApplyDisableThresholdForScheduledTest() bool {
+	return common.AutomaticDisableChannelEnabled && operation_setting.GetMonitorSetting().AutoTestChannelDisableOnFailure
+}
+
+func testChannels(
+	notify bool,
+	shouldTestChannel func(*model.Channel) bool,
+	shouldDisableChannel func(*types.NewAPIError) bool,
+	shouldApplyDisableThreshold func() bool,
+) error {
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
 		return err
@@ -923,7 +963,7 @@ func testAllChannels(notify bool) error {
 		}()
 
 		for _, channel := range channels {
-			if channel.Status == common.ChannelStatusManuallyDisabled {
+			if !shouldTestChannel(channel) {
 				continue
 			}
 			isChannelEnabled := channel.Status == common.ChannelStatusEnabled
@@ -936,11 +976,11 @@ func testAllChannels(notify bool) error {
 			newAPIError := result.newAPIError
 			// request error disables the channel
 			if newAPIError != nil {
-				shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
+				shouldBanChannel = shouldDisableChannel(result.newAPIError)
 			}
 
 			// 当错误检查通过，才检查响应时间
-			if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
+			if shouldApplyDisableThreshold() && !shouldBanChannel {
 				if milliseconds > disableThreshold {
 					err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
 					newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
@@ -967,6 +1007,14 @@ func testAllChannels(notify bool) error {
 		}
 	})
 	return nil
+}
+
+func testAllChannels(notify bool) error {
+	return testChannels(notify, shouldTestChannelForManualTest, shouldDisableChannelForManualTest, shouldApplyDisableThresholdForManualTest)
+}
+
+func testScheduledChannels() error {
+	return testChannels(false, shouldTestChannelForScheduledTest, shouldDisableChannelForScheduledTest, shouldApplyDisableThresholdForScheduledTest)
 }
 
 func TestAllChannels(c *gin.Context) {
@@ -998,8 +1046,8 @@ func AutomaticallyTestChannels() {
 				frequency := operation_setting.GetMonitorSetting().AutoTestChannelMinutes
 				time.Sleep(time.Duration(int(math.Round(frequency))) * time.Minute)
 				common.SysLog(fmt.Sprintf("automatically test channels with interval %f minutes", frequency))
-				common.SysLog("automatically testing all channels")
-				_ = testAllChannels(false)
+				common.SysLog("automatically testing scheduled channels")
+				_ = testScheduledChannels()
 				common.SysLog("automatically channel test finished")
 				if !operation_setting.GetMonitorSetting().AutoTestChannelEnabled {
 					break

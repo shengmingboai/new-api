@@ -67,6 +67,7 @@ const monitoringSchema = z
         .number()
         .int()
         .min(1, 'Interval must be at least 1 minute'),
+      auto_test_channel_disable_on_failure: z.boolean(),
     }),
   })
   .superRefine((values, ctx) => {
@@ -111,6 +112,7 @@ type MonitoringSettingsSectionProps = {
     AutomaticRetryStatusCodes: string
     'monitor_setting.auto_test_channel_enabled': boolean
     'monitor_setting.auto_test_channel_minutes': number
+    'monitor_setting.auto_test_channel_disable_on_failure': boolean
   }
 }
 
@@ -128,6 +130,7 @@ type NormalizedMonitoringValues = {
   AutomaticRetryStatusCodes: string
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
+  'monitor_setting.auto_test_channel_disable_on_failure': boolean
 }
 
 const buildFormDefaults = (
@@ -147,6 +150,8 @@ const buildFormDefaults = (
       defaults['monitor_setting.auto_test_channel_enabled'],
     auto_test_channel_minutes:
       defaults['monitor_setting.auto_test_channel_minutes'],
+    auto_test_channel_disable_on_failure:
+      defaults['monitor_setting.auto_test_channel_disable_on_failure'],
   },
 })
 
@@ -170,6 +175,8 @@ const normalizeDefaults = (
     defaults['monitor_setting.auto_test_channel_enabled'],
   'monitor_setting.auto_test_channel_minutes':
     defaults['monitor_setting.auto_test_channel_minutes'],
+  'monitor_setting.auto_test_channel_disable_on_failure':
+    defaults['monitor_setting.auto_test_channel_disable_on_failure'],
 })
 
 const normalizeFormValues = (
@@ -192,6 +199,8 @@ const normalizeFormValues = (
     values.monitor_setting.auto_test_channel_enabled,
   'monitor_setting.auto_test_channel_minutes':
     values.monitor_setting.auto_test_channel_minutes,
+  'monitor_setting.auto_test_channel_disable_on_failure':
+    values.monitor_setting.auto_test_channel_disable_on_failure,
 })
 
 export function MonitoringSettingsSection({
@@ -361,7 +370,9 @@ export function MonitoringSettingsSection({
                   <SettingsSwitchContent>
                     <FormLabel>{t('Disable on failure')}</FormLabel>
                     <FormDescription>
-                      {t('Automatically disable channels when tests fail')}
+                      {t(
+                        'Automatically disable channels when failures match the disable rules'
+                      )}
                     </FormDescription>
                   </SettingsSwitchContent>
                   <FormControl>
@@ -374,6 +385,33 @@ export function MonitoringSettingsSection({
               )}
             />
 
+            <FormField
+              control={form.control}
+              name='monitor_setting.auto_test_channel_disable_on_failure'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>
+                      {t('Disable on scheduled test failure')}
+                    </FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Include enabled channels in scheduled tests and disable them when the test fails'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+          </div>
+
+          <div className='grid gap-6 md:grid-cols-2'>
             <FormField
               control={form.control}
               name='AutomaticEnableChannelEnabled'
