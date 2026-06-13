@@ -2,9 +2,12 @@ package controller
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -14,8 +17,54 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func setupChannelTestLogDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalUsingSQLite := common.UsingSQLite
+	originalUsingMySQL := common.UsingMySQL
+	originalUsingPostgreSQL := common.UsingPostgreSQL
+	originalRedisEnabled := common.RedisEnabled
+	originalLogConsumeEnabled := common.LogConsumeEnabled
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		common.UsingSQLite = originalUsingSQLite
+		common.UsingMySQL = originalUsingMySQL
+		common.UsingPostgreSQL = originalUsingPostgreSQL
+		common.RedisEnabled = originalRedisEnabled
+		common.LogConsumeEnabled = originalLogConsumeEnabled
+	})
+
+	common.UsingSQLite = true
+	common.UsingMySQL = false
+	common.UsingPostgreSQL = false
+	common.RedisEnabled = false
+	common.LogConsumeEnabled = true
+
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	model.DB = db
+	model.LOG_DB = db
+
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Log{}))
+	t.Cleanup(func() {
+		sqlDB, err := db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	return db
+}
 
 func TestSettleTestQuotaUsesTieredBilling(t *testing.T) {
 	info := &relaycommon.RelayInfo{
@@ -186,6 +235,44 @@ func TestShouldTestChannelForManualTest(t *testing.T) {
 	require.True(t, shouldTestChannelForManualTest(&model.Channel{Status: common.ChannelStatusEnabled}))
 	require.True(t, shouldTestChannelForManualTest(&model.Channel{Status: common.ChannelStatusAutoDisabled}))
 	require.False(t, shouldTestChannelForManualTest(&model.Channel{Status: common.ChannelStatusManuallyDisabled}))
+}
+
+func TestRecordFailedChannelTestLogRecordsModelTestFailure(t *testing.T) {
+	db := setupChannelTestLogDB(t)
+	require.NoError(t, db.Create(&model.User{
+		Id:       1,
+		Username: "root",
+		Role:     common.RoleRootUser,
+		Status:   common.UserStatusEnabled,
+	}).Error)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("username", "root")
+	ctx.Set("original_model", "gpt-test")
+	ctx.Set("group", "default")
+	channel := &model.Channel{
+		Id:     7,
+		Name:   "failed-test-channel",
+		Type:   1,
+		Status: common.ChannelStatusAutoDisabled,
+	}
+	apiErr := types.NewOpenAIError(errors.New("invalid api key"), types.ErrorCodeBadResponse, http.StatusUnauthorized)
+
+	recordFailedChannelTestLog(ctx, channel, 1, "", "", false, time.Now(), testResult{
+		localErr:    apiErr,
+		newAPIError: apiErr,
+	})
+
+	var log model.Log
+	require.NoError(t, db.Order("id desc").First(&log).Error)
+	require.Equal(t, model.LogTypeError, log.Type)
+	require.Equal(t, "模型测试", log.TokenName)
+	require.Equal(t, "gpt-test", log.ModelName)
+	require.Equal(t, 0, log.Quota)
+	require.Equal(t, 7, log.ChannelId)
+	require.Contains(t, log.Content, "模型测试失败")
+	require.Contains(t, log.Content, "invalid api key")
+	require.Contains(t, log.Other, `"test_success":false`)
 }
 
 func TestScheduledDisableChecksRequireGlobalAndScheduledSwitches(t *testing.T) {
